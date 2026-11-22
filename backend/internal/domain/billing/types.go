@@ -106,6 +106,8 @@ const (
 	PaymentProviderStripe = "stripe"
 	// PaymentProviderEPay 表示易支付。
 	PaymentProviderEPay = "epay"
+	// PaymentProviderNano 表示 Nano (XNO) nano:mainnet exact 收款。
+	PaymentProviderNano = "nano"
 
 	// PaymentStatusPending 表示支付待完成。
 	PaymentStatusPending = "pending"

@@ -19,10 +19,32 @@ type epayCheckoutProvider interface {
 	VerifySignature(values url.Values, key string) bool
 }
 
+type nanoCheckoutProvider interface {
+	Quote(ctx context.Context, input paymentport.NanoCheckoutInput) (paymentport.NanoCheckout, error)
+	VerifyPayment(ctx context.Context, input paymentport.NanoVerifyInput) (string, error)
+}
+
 // PaymentCheckoutService 编排支付收银台创建和第三方协议映射。
 type PaymentCheckoutService struct {
 	stripe stripeCheckoutProvider
 	epay   epayCheckoutProvider
+	nano   nanoCheckoutProvider
+}
+
+// NanoCheckoutInput 定义创建 Nano (XNO) 收款报价的应用层入参。
+type NanoCheckoutInput struct {
+	PayTo      string
+	XNOPerUnit string
+	Order      *domainbilling.PaymentOrder
+}
+
+// NanoVerifyInput 定义校验 Nano (XNO) 付款的应用层入参。
+type NanoVerifyInput struct {
+	NodeURL    string
+	PayTo      string
+	XNOPerUnit string
+	Order      *domainbilling.PaymentOrder
+	BlockHash  string
 }
 
 // StripeCheckoutInput 定义创建 Stripe Checkout Session 的应用层入参。
@@ -61,6 +83,59 @@ type PaymentProduct struct {
 // NewPaymentCheckoutService 创建依赖完整的支付收银台应用服务。
 func NewPaymentCheckoutService(stripe stripeCheckoutProvider, epay epayCheckoutProvider) *PaymentCheckoutService {
 	return &PaymentCheckoutService{stripe: stripe, epay: epay}
+}
+
+// WithNano 启用 Nano (XNO) 收款渠道；未调用时 Nano 相关方法返回 ErrPaymentProviderUnavailable。
+func (s *PaymentCheckoutService) WithNano(nano nanoCheckoutProvider) *PaymentCheckoutService {
+	if s != nil {
+		s.nano = nano
+	}
+	return s
+}
+
+// CreateNanoCheckout 为订单生成唯一可接受的 Nano 付款：精确 raw 金额与绑定订单的代表账户。
+func (s *PaymentCheckoutService) CreateNanoCheckout(ctx context.Context, input NanoCheckoutInput) (paymentport.NanoCheckout, error) {
+	if s == nil || s.nano == nil {
+		return paymentport.NanoCheckout{}, ErrPaymentProviderUnavailable
+	}
+	if input.Order == nil {
+		return paymentport.NanoCheckout{}, fmt.Errorf("payment order is required")
+	}
+	if input.Order.Provider != domainbilling.PaymentProviderNano || input.Order.Status != domainbilling.PaymentStatusPending {
+		return paymentport.NanoCheckout{}, ErrPaymentOrderStateInvalid
+	}
+	return s.nano.Quote(ctx, paymentport.NanoCheckoutInput{
+		PayTo:          input.PayTo,
+		XNOPerUnit:     input.XNOPerUnit,
+		OrderNo:        input.Order.OrderNo,
+		PayCurrency:    input.Order.PayCurrency,
+		PayAmountCents: input.Order.PayAmountCents,
+	})
+}
+
+// VerifyNanoPayment 从运营方节点读取区块并校验其精确支付该订单，返回作为外部支付 ID 保存的区块哈希。
+// 已支付或已记录外部支付 ID 的订单一律拒绝，因此同一区块在重启后也不能再次入账；
+// 代表账户承诺了订单号，区块也无法支付其他订单。
+func (s *PaymentCheckoutService) VerifyNanoPayment(ctx context.Context, input NanoVerifyInput) (string, error) {
+	if s == nil || s.nano == nil {
+		return "", ErrPaymentProviderUnavailable
+	}
+	if input.Order == nil {
+		return "", fmt.Errorf("payment order is required")
+	}
+	if input.Order.Provider != domainbilling.PaymentProviderNano ||
+		input.Order.Status != domainbilling.PaymentStatusPending ||
+		input.Order.ExternalPaymentID != "" {
+		return "", ErrPaymentOrderStateInvalid
+	}
+	return s.nano.VerifyPayment(ctx, paymentport.NanoVerifyInput{
+		NodeURL:        input.NodeURL,
+		PayTo:          input.PayTo,
+		XNOPerUnit:     input.XNOPerUnit,
+		OrderNo:        input.Order.OrderNo,
+		PayAmountCents: input.Order.PayAmountCents,
+		BlockHash:      input.BlockHash,
+	})
 }
 
 // VerifyEPaySignature 校验易支付 submit.php 通知签名。
